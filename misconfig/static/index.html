@@ -1,0 +1,158 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Cloud Misconfiguration Dashboard</title>
+<script src="https://unpkg.com/vue@3.4.38/dist/vue.global.prod.js"></script>
+<style>
+  :root { --bg:#0f172a; --panel:#1e293b; --text:#e2e8f0; --muted:#94a3b8; --line:#334155;
+          --crit:#ef4444; --high:#f97316; --med:#eab308; --low:#3b82f6; --ok:#22c55e; }
+  * { box-sizing: border-box; }
+  body { margin:0; font-family: system-ui, -apple-system, Segoe UI, sans-serif; background:var(--bg); color:var(--text); }
+  header { display:flex; justify-content:space-between; align-items:center; padding:16px 24px; border-bottom:1px solid var(--line); flex-wrap:wrap; gap:12px; }
+  h1 { font-size:18px; margin:0; } h2 { font-size:15px; margin:0 0 12px; color:var(--muted); font-weight:600; }
+  main { padding:24px; display:grid; gap:16px; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); max-width:1400px; margin:auto; }
+  .panel { background:var(--panel); border-radius:10px; padding:16px; border:1px solid var(--line); }
+  .wide { grid-column: 1 / -1; }
+  button, select, input { background:#0b1222; color:var(--text); border:1px solid var(--line); border-radius:6px; padding:8px 12px; font:inherit; }
+  button.primary { background:#2563eb; border-color:#2563eb; cursor:pointer; } button:disabled { opacity:.5; }
+  .score { font-size:48px; font-weight:700; } .grade { font-size:48px; font-weight:700; margin-left:12px; }
+  .bar { display:flex; align-items:center; gap:8px; margin:6px 0; font-size:13px; }
+  .bar span:first-child { width:90px; color:var(--muted); }
+  .bar .fill { height:14px; border-radius:3px; }
+  table { width:100%; border-collapse:collapse; font-size:13px; }
+  th, td { text-align:left; padding:8px 6px; border-bottom:1px solid var(--line); vertical-align:top; }
+  th { color:var(--muted); font-weight:600; }
+  .sev { padding:2px 8px; border-radius:999px; font-size:11px; font-weight:700; color:#fff; }
+  .CRITICAL{background:var(--crit)} .HIGH{background:var(--high)} .MEDIUM{background:var(--med);color:#111} .LOW{background:var(--low)}
+  .mono { font-family: ui-monospace, monospace; font-size:12px; word-break:break-all; }
+  .muted { color:var(--muted); } .filters { display:flex; gap:8px; flex-wrap:wrap; margin-bottom:12px; }
+  .table-wrap { overflow-x:auto; }
+  svg text { fill: var(--muted); font-size: 10px; }
+</style>
+</head>
+<body>
+<div id="app">
+  <header>
+    <h1>☁️ Cloud Misconfiguration Detection</h1>
+    <div style="display:flex;gap:8px;align-items:center">
+      <select v-model="selectedId" @change="load">
+        <option v-for="s in scans" :value="s.id">Scan #{{ s.id }} · {{ s.finished_at.slice(0,16) }}</option>
+      </select>
+      <button class="primary" :disabled="busy" @click="newScan">{{ busy ? 'Scanning…' : 'Run scan' }}</button>
+    </div>
+  </header>
+  <main v-if="report">
+    <section class="panel">
+      <h2>Risk score</h2>
+      <div><span class="score" :style="{color: gradeColor}">{{ report.risk_score }}</span><span class="muted">/100</span>
+        <span class="grade" :style="{color: gradeColor}">{{ report.grade }}</span></div>
+      <p class="muted">Account {{ report.account_id }} · {{ report.checks_run }} checks · {{ report.regions.join(', ') }}</p>
+    </section>
+    <section class="panel">
+      <h2>Findings by severity</h2>
+      <div class="bar" v-for="sev in ['CRITICAL','HIGH','MEDIUM','LOW']">
+        <span>{{ sev }}</span><div class="fill" :class="sev" :style="{width: pct(report.severity_counts[sev], maxSev) + '%'}"></div><b>{{ report.severity_counts[sev] }}</b>
+      </div>
+    </section>
+    <section class="panel">
+      <h2>Risk by service</h2>
+      <div class="bar" v-for="s in report.by_service">
+        <span>{{ s.service }}</span><div class="fill" style="background:#6366f1" :style="{width: pct(s.risk, maxSvc) + '%'}"></div><b>{{ s.findings }}</b>
+      </div>
+    </section>
+    <section class="panel">
+      <h2>Risk trend</h2>
+      <svg viewBox="0 0 300 110" width="100%">
+        <polyline :points="trendPoints" fill="none" stroke="#38bdf8" stroke-width="2"/>
+        <circle v-for="p in trendDots" :cx="p.x" :cy="p.y" r="3" fill="#38bdf8"><title>#{{p.id}}: {{p.v}}</title></circle>
+        <text x="0" y="108">older</text><text x="270" y="108">latest</text>
+      </svg>
+    </section>
+    <section class="panel wide">
+      <h2>Findings</h2>
+      <div class="filters">
+        <select v-model="filter.severity" @change="loadFindings"><option value="">All severities</option>
+          <option v-for="s in ['CRITICAL','HIGH','MEDIUM','LOW']">{{ s }}</option></select>
+        <select v-model="filter.service" @change="loadFindings"><option value="">All services</option>
+          <option v-for="s in report.by_service">{{ s.service }}</option></select>
+        <select v-model="filter.status" @change="loadFindings"><option value="">Any status</option>
+          <option>OPEN</option><option>REMEDIATED</option></select>
+        <input v-model="search" placeholder="Search resource or check…">
+      </div>
+      <div class="table-wrap"><table>
+        <thead><tr><th>Severity</th><th>Check</th><th>Resource</th><th>Details</th><th>Risk</th><th></th></tr></thead>
+        <tbody>
+          <tr v-for="f in shownFindings" :key="f.id">
+            <td><span class="sev" :class="f.severity">{{ f.severity }}</span></td>
+            <td><b>{{ f.check_id }}</b><br><span class="muted">{{ f.title }}</span></td>
+            <td class="mono">{{ f.resource }}<br><span class="muted">{{ f.region }}</span></td>
+            <td>{{ f.details }}<br><span class="muted">Fix: {{ f.remediation }}</span></td>
+            <td>{{ f.risk_score }}<span v-if="f.public_exposure" title="internet exposed"> 🌐</span></td>
+            <td>
+              <span v-if="f.status === 'REMEDIATED'" style="color:var(--ok)">Fixed</span>
+              <button v-else-if="f.auto_remediable" @click="fix(f)">Fix</button>
+            </td>
+          </tr>
+        </tbody>
+      </table></div>
+      <p class="muted" v-if="!shownFindings.length">No findings match.</p>
+    </section>
+  </main>
+  <main v-else><section class="panel wide"><p>No scans yet. Click <b>Run scan</b> to start.</p></section></main>
+</div>
+<script>
+const { createApp } = Vue;
+createApp({
+  data: () => ({ scans: [], selectedId: null, report: null, findings: [], busy: false, search: "",
+                 filter: { severity: "", service: "", status: "" } }),
+  computed: {
+    maxSev() { return Math.max(1, ...Object.values(this.report.severity_counts)); },
+    maxSvc() { return Math.max(1, ...this.report.by_service.map(s => s.risk)); },
+    gradeColor() { return { A: "var(--ok)", B: "#84cc16", C: "var(--med)", D: "var(--high)", F: "var(--crit)" }[this.report.grade]; },
+    trendDots() {
+      const t = this.report.trend, n = Math.max(1, t.length - 1);
+      return t.map((p, i) => ({ x: 10 + i * 280 / n, y: 95 - p.risk_score * 0.9, v: p.risk_score, id: p.scan_id }));
+    },
+    trendPoints() { return this.trendDots.map(p => `${p.x},${p.y}`).join(" "); },
+    shownFindings() {
+      const q = this.search.toLowerCase();
+      return this.findings.filter(f => !q || (f.resource + f.check_id + f.title).toLowerCase().includes(q));
+    },
+  },
+  methods: {
+    pct(v, max) { return Math.max(2, 100 * v / max); },
+    async api(path, opts) { const r = await fetch(path, opts); if (!r.ok) throw new Error(await r.text()); return r.json(); },
+    async refreshScans() {
+      this.scans = await this.api("/api/scans");
+      if (this.scans.length && !this.selectedId) this.selectedId = this.scans[0].id;
+    },
+    async load() {
+      if (!this.selectedId) return;
+      this.report = await this.api(`/api/scans/${this.selectedId}/report`);
+      await this.loadFindings();
+    },
+    async loadFindings() {
+      const q = new URLSearchParams(Object.entries(this.filter).filter(([, v]) => v));
+      this.findings = await this.api(`/api/scans/${this.selectedId}/findings?${q}`);
+    },
+    async newScan() {
+      this.busy = true;
+      try {
+        const s = await this.api("/api/scans", { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" });
+        this.selectedId = s.id; await this.refreshScans(); await this.load();
+      } catch (e) { alert("Scan failed: " + e.message); } finally { this.busy = false; }
+    },
+    async fix(f) {
+      if (!confirm(`Apply automatic fix to ${f.resource}?`)) return;
+      const r = await this.api(`/api/findings/${f.id}/remediate`, { method: "POST",
+        headers: { "Content-Type": "application/json" }, body: JSON.stringify({ dry_run: false }) });
+      alert(r.message); await this.loadFindings();
+    },
+  },
+  async mounted() { await this.refreshScans(); await this.load(); },
+}).mount("#app");
+</script>
+</body>
+</html>

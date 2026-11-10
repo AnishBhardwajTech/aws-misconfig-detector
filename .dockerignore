@@ -1,0 +1,9 @@
+__pycache__/
+*.pyc
+*.db
+.pytest_cache/
+.coverage
+test-results.xml
+report.json
+logs/
+.env

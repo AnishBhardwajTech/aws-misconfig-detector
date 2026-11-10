@@ -1,0 +1,62 @@
+# CloudFormation: lets GitHub Actions in one repo assume a read-only scanning role.
+# Deploy:  aws cloudformation deploy --template-file infra/github-oidc-role.yaml \
+#            --stack-name misconfig-scanner-oidc --capabilities CAPABILITY_NAMED_IAM \
+#            --parameter-overrides GitHubRepo=AnishBhardwajTech/aws-misconfig-detector
+AWSTemplateFormatVersion: "2010-09-09"
+Parameters:
+  GitHubRepo:
+    Type: String
+    Description: owner/repo allowed to assume the role
+  AllowRemediation:
+    Type: String
+    AllowedValues: ["true", "false"]
+    Default: "false"
+Conditions:
+  Remediate: !Equals [!Ref AllowRemediation, "true"]
+Resources:
+  GitHubOIDC:
+    Type: AWS::IAM::OIDCProvider
+    Properties:
+      Url: https://token.actions.githubusercontent.com
+      ClientIdList: [sts.amazonaws.com]
+  ScannerRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: misconfig-scanner
+      MaxSessionDuration: 3600
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal: { Federated: !Ref GitHubOIDC }
+            Action: sts:AssumeRoleWithWebIdentity
+            Condition:
+              StringEquals:
+                token.actions.githubusercontent.com:aud: sts.amazonaws.com
+              StringLike:
+                token.actions.githubusercontent.com:sub: !Sub "repo:${GitHubRepo}:*"
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/SecurityAudit
+      Policies:
+        - !If
+          - Remediate
+          - PolicyName: limited-remediation
+            PolicyDocument:
+              Version: "2012-10-17"
+              Statement:
+                - Effect: Allow
+                  Action:
+                    - s3:PutBucketPublicAccessBlock
+                    - s3:PutBucketAcl
+                    - s3:PutEncryptionConfiguration
+                    - s3:PutBucketVersioning
+                    - ec2:RevokeSecurityGroupIngress
+                    - ec2:EnableEbsEncryptionByDefault
+                    - ec2:ModifyInstanceMetadataOptions
+                    - iam:UpdateAccountPasswordPolicy
+                  Resource: "*"
+          - !Ref AWS::NoValue
+Outputs:
+  RoleArn:
+    Value: !GetAtt ScannerRole.Arn
+    Description: Put this in the repo variable AWS_SCAN_ROLE_ARN
